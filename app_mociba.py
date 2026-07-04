@@ -96,19 +96,21 @@ def cargar_datos_base():
         "1UjJeym8BHKD1OnUh-T6An6JWt9Ikl0mP"
     ]
 
+    # Generar todas las columnas posibles
     columnas_p5 = [f"P5_{i:02d}_{j}" for i in range(1, 14) for j in range(1, 4)]
     columnas_p7 = [f"P7_{i:02d}_{j}" for i in range(1, 14) for j in range(1, 4)]
-    columnas_p10 = [f"P10_{i:02d}_{j}" for i in range(1, 14) for j in range(1, 4)]  # Nuevas
+    columnas_p10 = [f"P10_{i:02d}_{j}" for i in range(1, 14) for j in range(1, 4)]
 
-    columnas = (
-        ["ANIO", "CVE_ENT", "NOM_ENT", "SEXO", "FACTOR", "EDAD", "NIVEL", "P7_4"]
-        + list(uso_medidas_de_seguridad.keys())
-        + list(medidas_de_seguridad.keys())
-        + [k for k in ciberacoso.keys() if k != "CUALQUIERA"]
-        + list(frecuencia_mensajes.keys())
-        + columnas_p5
-        + columnas_p7
-        + columnas_p10
+    columnas_base = ["ANIO", "CVE_ENT", "NOM_ENT", "SEXO", "FACTOR", "EDAD", "NIVEL", "P7_4"]
+    
+    columnas_preguntas = (
+        list(uso_medidas_de_seguridad.keys()) + 
+        list(medidas_de_seguridad.keys()) + 
+        [k for k in ciberacoso.keys() if k != "CUALQUIERA"] +
+        list(frecuencia_mensajes.keys()) +
+        columnas_p5 +
+        columnas_p7 +
+        columnas_p10
     )
 
     dfs = []
@@ -119,27 +121,49 @@ def cargar_datos_base():
         gdown.download(url, output, quiet=True)
         output.seek(0)
 
+        # PASO 1: Leer solo los encabezados para saber qué columnas existen
+        df_headers = pd.read_csv(
+            output,
+            encoding="latin1",
+            nrows=0,  # Solo leer encabezados
+            low_memory=False
+        )
+        columnas_existentes = set(df_headers.columns)
+        
+        # PASO 2: Intersectar con las columnas que necesitamos
+        # (solo usar las que SÍ existen en este archivo)
+        output.seek(0)  # Reiniciar el buffer
+        
+        columnas_a_usar = [col for col in (columnas_base + columnas_preguntas) 
+                          if col in columnas_existentes]
+        
+        # Verificar columnas faltantes (para debugging)
+        columnas_faltantes = [col for col in (columnas_base + columnas_preguntas) 
+                             if col not in columnas_existentes]
+        if columnas_faltantes:
+            st.warning(f"⚠️ Archivo {file_id[:10]}... no tiene las columnas: {', '.join(columnas_faltantes[:10])}{'...' if len(columnas_faltantes) > 10 else ''}")
+
+        # PASO 3: Leer el CSV completo solo con las columnas que existen
         df_temp = pd.read_csv(
             output,
             encoding="latin1",
-            usecols=columnas,
+            usecols=columnas_a_usar,
             low_memory=False
         )
+        
+        # PASO 4: Agregar columnas faltantes con NaN (para mantener consistencia)
+        for col in (columnas_base + columnas_preguntas):
+            if col not in df_temp.columns:
+                df_temp[col] = pd.NA
+        
         dfs.append(df_temp)
 
     df_final = pd.concat(dfs, ignore_index=True)
     
-    todas_preguntas = (
-        list(uso_medidas_de_seguridad.keys()) + 
-        list(medidas_de_seguridad.keys()) + 
-        [k for k in ciberacoso.keys() if k != "CUALQUIERA"] +
-        list(frecuencia_mensajes.keys()) +
-        columnas_p5 +
-        columnas_p7 +
-        columnas_p10
-    )
-    for col in todas_preguntas:
-        df_final[col] = pd.to_numeric(df_final[col], errors='coerce')
+    # Convertir TODAS las columnas de preguntas a numérico
+    for col in columnas_preguntas:
+        if col in df_final.columns:
+            df_final[col] = pd.to_numeric(df_final[col], errors='coerce')
     
     df_final["EDAD"] = pd.to_numeric(df_final["EDAD"], errors='coerce')
     df_final["NIVEL"] = pd.to_numeric(df_final["NIVEL"], errors='coerce')
