@@ -154,75 +154,76 @@ def cargar_datos_base():
         columnas_p10
     )
     
+    # Lista completa de columnas que queremos tener al final
     todas_columnas = columnas_base + columnas_preguntas + ["NOM_ENT"]
 
     dfs = []
 
-    for file_id in file_ids:
-        url = f"https://drive.google.com/uc?id={file_id}"
-        output = io.BytesIO()
-        gdown.download(url, output, quiet=True)
-        output.seek(0)
+    for idx, file_id in enumerate(file_ids):
+        try:
+            url = f"https://drive.google.com/uc?id={file_id}"
+            output = io.BytesIO()
+            gdown.download(url, output, quiet=True)
+            output.seek(0)
 
-        # PASO 1: Leer solo los encabezados
-        df_headers = pd.read_csv(
-            output,
-            encoding="latin1",
-            nrows=0,
-            low_memory=False
-        )
-        columnas_existentes = set(df_headers.columns)
-        output.seek(0)
-        
-        # PASO 2: Determinar columnas a usar
-        columnas_a_usar = [col for col in todas_columnas if col in columnas_existentes]
-        
-        # PASO 3: Leer el CSV completo
-        df_temp = pd.read_csv(
-            output,
-            encoding="latin1",
-            usecols=columnas_a_usar,
-            low_memory=False
-        )
-        
-        # PASO 4: AGREGAR COLUMNAS FALTANTES DE MANERA EFICIENTE (sin fragmentación)
-        columnas_faltantes = [col for col in todas_columnas if col not in df_temp.columns]
-        
-        if columnas_faltantes:
-            # Crear un DataFrame vacío con las columnas faltantes del mismo tamaño
-            df_faltantes = pd.DataFrame(
-                index=df_temp.index,
-                columns=columnas_faltantes,
-                data=pd.NA
+            # PASO 1: Leer solo los encabezados para saber qué columnas existen
+            df_headers = pd.read_csv(output, encoding="latin1", nrows=0, low_memory=False)
+            columnas_existentes = set(df_headers.columns)
+            output.seek(0)
+            
+            # PASO 2: Determinar qué columnas leer del CSV
+            columnas_a_usar = [col for col in todas_columnas if col in columnas_existentes]
+            
+            # PASO 3: Leer el CSV solo con las columnas que existen
+            df_temp = pd.read_csv(
+                output,
+                encoding="latin1",
+                usecols=columnas_a_usar,
+                low_memory=False
             )
-            # Concatenar de una sola vez (mucho más eficiente)
-            df_temp = pd.concat([df_temp, df_faltantes], axis=1)
-        
-        # PASO 5: Generar NOM_ENT desde CVE_ENT si es necesario
-        if "NOM_ENT" not in df_temp.columns or df_temp["NOM_ENT"].isna().all():
+            
+            # PASO 4: AGREGAR COLUMNAS FALTANTES DE UNA SOLA VEZ (sin fragmentación)
+            columnas_faltantes = [col for col in todas_columnas if col not in df_temp.columns]
+            
+            if columnas_faltantes:
+                # Crear DataFrame con columnas faltantes del mismo tamaño
+                df_faltantes = pd.DataFrame(
+                    index=df_temp.index,
+                    columns=columnas_faltantes,
+                    data=pd.NA
+                )
+                # Concatenar UNA SOLA VEZ (mucho más eficiente)
+                df_temp = pd.concat([df_temp, df_faltantes], axis=1)
+            
+            # PASO 5: Generar NOM_ENT desde CVE_ENT si es necesario
             df_temp["CVE_ENT"] = pd.to_numeric(df_temp["CVE_ENT"], errors='coerce')
-            df_temp["NOM_ENT"] = df_temp["CVE_ENT"].map(mapeo_entidades)
-        
-        dfs.append(df_temp)
+            if "NOM_ENT" not in df_temp.columns or df_temp["NOM_ENT"].isna().all():
+                df_temp["NOM_ENT"] = df_temp["CVE_ENT"].map(mapeo_entidades)
+            
+            dfs.append(df_temp)
+            
+        except Exception as e:
+            st.warning(f"⚠️ Error procesando archivo {idx+1}: {str(e)[:100]}")
+            continue
 
     # Concatenar todos los DataFrames
     df_final = pd.concat(dfs, ignore_index=True)
     
-    # Convertir columnas de preguntas a numérico de manera eficiente
+    # Convertir columnas de preguntas a numérico
     for col in columnas_preguntas:
         if col in df_final.columns:
             df_final[col] = pd.to_numeric(df_final[col], errors='coerce')
     
+    # Asegurar tipos numéricos en columnas base
     df_final["CVE_ENT"] = pd.to_numeric(df_final["CVE_ENT"], errors='coerce')
     df_final["EDAD"] = pd.to_numeric(df_final["EDAD"], errors='coerce')
     df_final["NIVEL"] = pd.to_numeric(df_final["NIVEL"], errors='coerce')
     df_final["P7_4"] = pd.to_numeric(df_final["P7_4"], errors='coerce')
     
-    # Asegurar que NOM_ENT siempre exista
-    if df_final["NOM_ENT"].isna().any():
-        df_final["NOM_ENT"] = df_final["NOM_ENT"].fillna(
-            df_final["CVE_ENT"].map(mapeo_entidades)
-        )
+    # Rellenar NOM_ENT faltante usando CVE_ENT (sin crear columna temporal)
+    mask_nom_ent_na = df_final["NOM_ENT"].isna()
+    if mask_nom_ent_na.any():
+        df_final.loc[mask_nom_ent_na, "NOM_ENT"] = df_final.loc[mask_nom_ent_na, "CVE_ENT"].map(mapeo_entidades)
     
     # Liberar memoria
     import gc
