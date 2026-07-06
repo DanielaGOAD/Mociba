@@ -142,9 +142,7 @@ def cargar_datos_base():
     columnas_p7 = [f"P7_{i:02d}_{j}" for i in range(1, 14) for j in range(1, 4)]
     columnas_p10 = [f"P10_{i:02d}_{j}" for i in range(1, 14) for j in range(1, 4)]
 
-    # CVE_ENT es OBLIGATORIA porque con ella generamos NOM_ENT si falta
     columnas_base = ["ANIO", "CVE_ENT", "SEXO", "FACTOR", "EDAD", "NIVEL", "P7_4"]
-    # NOM_ENT se maneja por separado (se genera si no existe)
     
     columnas_preguntas = (
         list(uso_medidas_de_seguridad.keys()) + 
@@ -155,6 +153,8 @@ def cargar_datos_base():
         columnas_p7 +
         columnas_p10
     )
+    
+    todas_columnas = columnas_base + columnas_preguntas + ["NOM_ENT"]
 
     dfs = []
 
@@ -164,7 +164,7 @@ def cargar_datos_base():
         gdown.download(url, output, quiet=True)
         output.seek(0)
 
-        # PASO 1: Leer solo los encabezados para saber qué columnas existen
+        # PASO 1: Leer solo los encabezados
         df_headers = pd.read_csv(
             output,
             encoding="latin1",
@@ -172,32 +172,12 @@ def cargar_datos_base():
             low_memory=False
         )
         columnas_existentes = set(df_headers.columns)
-        
-        # PASO 2: Intersectar con las columnas que necesitamos
         output.seek(0)
         
-        columnas_a_usar = [col for col in (columnas_base + columnas_preguntas) 
-                          if col in columnas_existentes]
+        # PASO 2: Determinar columnas a usar
+        columnas_a_usar = [col for col in todas_columnas if col in columnas_existentes]
         
-        # También incluir NOM_ENT si existe
-        if "NOM_ENT" in columnas_existentes:
-            columnas_a_usar.append("NOM_ENT")
-        
-        # Verificar columnas faltantes (para debugging)
-        columnas_faltantes = [col for col in (columnas_base + columnas_preguntas) 
-                             if col not in columnas_existentes]
-        
-        nom_ent_faltante = "NOM_ENT" not in columnas_existentes
-        
-        if columnas_faltantes or nom_ent_faltante:
-            mensaje = f"⚠️ Archivo {file_id[:10]}..."
-            if nom_ent_faltante:
-                mensaje += " - Se generará NOM_ENT desde CVE_ENT."
-            if columnas_faltantes:
-                mensaje += f" Columnas faltantes: {', '.join(columnas_faltantes[:5])}{'...' if len(columnas_faltantes) > 5 else ''}"
-            st.info(mensaje)
-
-        # PASO 3: Leer el CSV completo solo con las columnas que existen
+        # PASO 3: Leer el CSV completo
         df_temp = pd.read_csv(
             output,
             encoding="latin1",
@@ -205,23 +185,30 @@ def cargar_datos_base():
             low_memory=False
         )
         
-        # PASO 4: Agregar columnas faltantes con NaN
-        for col in (columnas_base + columnas_preguntas):
-            if col not in df_temp.columns:
-                df_temp[col] = pd.NA
+        # PASO 4: AGREGAR COLUMNAS FALTANTES DE MANERA EFICIENTE (sin fragmentación)
+        columnas_faltantes = [col for col in todas_columnas if col not in df_temp.columns]
         
-        # PASO 5: Generar NOM_ENT desde CVE_ENT si no existe
-        if "NOM_ENT" not in df_temp.columns:
-            # Asegurar que CVE_ENT sea numérico
+        if columnas_faltantes:
+            # Crear un DataFrame vacío con las columnas faltantes del mismo tamaño
+            df_faltantes = pd.DataFrame(
+                index=df_temp.index,
+                columns=columnas_faltantes,
+                data=pd.NA
+            )
+            # Concatenar de una sola vez (mucho más eficiente)
+            df_temp = pd.concat([df_temp, df_faltantes], axis=1)
+        
+        # PASO 5: Generar NOM_ENT desde CVE_ENT si es necesario
+        if "NOM_ENT" not in df_temp.columns or df_temp["NOM_ENT"].isna().all():
             df_temp["CVE_ENT"] = pd.to_numeric(df_temp["CVE_ENT"], errors='coerce')
-            # Mapear usando el diccionario
             df_temp["NOM_ENT"] = df_temp["CVE_ENT"].map(mapeo_entidades)
         
         dfs.append(df_temp)
 
+    # Concatenar todos los DataFrames
     df_final = pd.concat(dfs, ignore_index=True)
     
-    # Convertir TODAS las columnas de preguntas a numérico
+    # Convertir columnas de preguntas a numérico de manera eficiente
     for col in columnas_preguntas:
         if col in df_final.columns:
             df_final[col] = pd.to_numeric(df_final[col], errors='coerce')
@@ -231,14 +218,15 @@ def cargar_datos_base():
     df_final["NIVEL"] = pd.to_numeric(df_final["NIVEL"], errors='coerce')
     df_final["P7_4"] = pd.to_numeric(df_final["P7_4"], errors='coerce')
     
-    # Asegurar que NOM_ENT siempre exista y sea string
-    if "NOM_ENT" not in df_final.columns:
-        df_final["NOM_ENT"] = df_final["CVE_ENT"].map(mapeo_entidades)
-    else:
-        # Si NOM_ENT existe pero tiene NaN (por CVE_ENT inválido), rellenar con el mapeo
-        df_final["CVE_ENT_num"] = pd.to_numeric(df_final["CVE_ENT"], errors='coerce')
-        df_final["NOM_ENT"] = df_final["NOM_ENT"].fillna(df_final["CVE_ENT_num"].map(mapeo_entidades))
-        df_final = df_final.drop(columns=["CVE_ENT_num"])
+    # Asegurar que NOM_ENT siempre exista
+    if df_final["NOM_ENT"].isna().any():
+        df_final["NOM_ENT"] = df_final["NOM_ENT"].fillna(
+            df_final["CVE_ENT"].map(mapeo_entidades)
+        )
+    
+    # Liberar memoria
+    import gc
+    gc.collect()
         
     return df_final
 
