@@ -1,7 +1,9 @@
 import streamlit as st
 import pandas as pd
+import numpy as np
 import io
 import gdown
+import gc
 
 # --- Grupo 1: Uso de medidas de seguridad
 uso_medidas_de_seguridad = {
@@ -90,39 +92,19 @@ mapeo_efectos_ciberacoso = {
 
 # --- Mapeo de CVE_ENT a NOM_ENT (estándar INEGI)
 mapeo_entidades = {
-    1: "AGUASCALIENTES",
-    2: "BAJA CALIFORNIA",
-    3: "BAJA CALIFORNIA SUR",
-    4: "CAMPECHE",
-    5: "COAHUILA DE ZARAGOZA",
-    6: "COLIMA",
-    7: "CHIAPAS",
-    8: "CHIHUAHUA",
-    9: "CIUDAD DE MEXICO",
-    10: "DURANGO",
-    11: "GUANAJUATO",
-    12: "GUERRERO",
-    13: "HIDALGO",
-    14: "JALISCO",
-    15: "MEXICO",
-    16: "MICHOACAN DE OCAMPO",
-    17: "MORELOS",
-    18: "NAYARIT",
-    19: "NUEVO LEON",
-    20: "OAXACA",
-    21: "PUEBLA",
-    22: "QUERETARO",
-    23: "QUINTANA ROO",
-    24: "SAN LUIS POTOSI",
-    25: "SINALOA",
-    26: "SONORA",
-    27: "TABASCO",
-    28: "TAMAULIPAS",
-    29: "TLAXCALA",
-    30: "VERACRUZ DE IGNACIO DE LA LLAVE",
-    31: "YUCATAN",
-    32: "ZACATECAS"
+    1: "AGUASCALIENTES", 2: "BAJA CALIFORNIA", 3: "BAJA CALIFORNIA SUR",
+    4: "CAMPECHE", 5: "COAHUILA DE ZARAGOZA", 6: "COLIMA",
+    7: "CHIAPAS", 8: "CHIHUAHUA", 9: "CIUDAD DE MEXICO",
+    10: "DURANGO", 11: "GUANAJUATO", 12: "GUERRERO",
+    13: "HIDALGO", 14: "JALISCO", 15: "MEXICO",
+    16: "MICHOACAN DE OCAMPO", 17: "MORELOS", 18: "NAYARIT",
+    19: "NUEVO LEON", 20: "OAXACA", 21: "PUEBLA",
+    22: "QUERETARO", 23: "QUINTANA ROO", 24: "SAN LUIS POTOSI",
+    25: "SINALOA", 26: "SONORA", 27: "TABASCO",
+    28: "TAMAULIPAS", 29: "TLAXCALA", 30: "VERACRUZ DE IGNACIO DE LA LLAVE",
+    31: "YUCATAN", 32: "ZACATECAS"
 }
+
 
 @st.cache_data(show_spinner="Cargando datos desde Google Drive...")
 def cargar_datos_base():
@@ -143,37 +125,33 @@ def cargar_datos_base():
     columnas_p10 = [f"P10_{i:02d}_{j}" for i in range(1, 14) for j in range(1, 4)]
 
     columnas_base = ["ANIO", "CVE_ENT", "SEXO", "FACTOR", "EDAD", "NIVEL", "P7_4"]
-    
+
     columnas_preguntas = (
-        list(uso_medidas_de_seguridad.keys()) + 
-        list(medidas_de_seguridad.keys()) + 
+        list(uso_medidas_de_seguridad.keys()) +
+        list(medidas_de_seguridad.keys()) +
         [k for k in ciberacoso.keys() if k != "CUALQUIERA"] +
         list(frecuencia_mensajes.keys()) +
-        columnas_p5 +
-        columnas_p7 +
-        columnas_p10
+        columnas_p5 + columnas_p7 + columnas_p10
     )
-    
-    # Lista completa de columnas que queremos tener al final
-    todas_columnas = columnas_base + columnas_preguntas + ["NOM_ENT"]
 
+    todas_columnas = columnas_base + columnas_preguntas + ["NOM_ENT"]
     dfs = []
 
-    for idx, file_id in enumerate(file_ids):
+    for file_id in file_ids:
         try:
             url = f"https://drive.google.com/uc?id={file_id}"
             output = io.BytesIO()
             gdown.download(url, output, quiet=True)
             output.seek(0)
 
-            # PASO 1: Leer solo los encabezados para saber qué columnas existen
+            # PASO 1: Leer solo encabezados para saber qué columnas existen
             df_headers = pd.read_csv(output, encoding="latin1", nrows=0, low_memory=False)
             columnas_existentes = set(df_headers.columns)
             output.seek(0)
-            
-            # PASO 2: Determinar qué columnas leer del CSV
+
+            # PASO 2: Determinar qué columnas leer
             columnas_a_usar = [col for col in todas_columnas if col in columnas_existentes]
-            
+
             # PASO 3: Leer el CSV solo con las columnas que existen
             df_temp = pd.read_csv(
                 output,
@@ -181,57 +159,55 @@ def cargar_datos_base():
                 usecols=columnas_a_usar,
                 low_memory=False
             )
-            
+
             # PASO 4: AGREGAR COLUMNAS FALTANTES DE UNA SOLA VEZ (sin fragmentación)
             columnas_faltantes = [col for col in todas_columnas if col not in df_temp.columns]
-            
             if columnas_faltantes:
-                # Crear DataFrame con columnas faltantes del mismo tamaño
                 df_faltantes = pd.DataFrame(
+                    np.nan,  # ✅ Usar np.nan en lugar de pd.NA
                     index=df_temp.index,
-                    columns=columnas_faltantes,
-                    data=pd.NA
+                    columns=columnas_faltantes
                 )
-                # Concatenar UNA SOLA VEZ (mucho más eficiente)
                 df_temp = pd.concat([df_temp, df_faltantes], axis=1)
-            
+
             # PASO 5: Generar NOM_ENT desde CVE_ENT si es necesario
             df_temp["CVE_ENT"] = pd.to_numeric(df_temp["CVE_ENT"], errors='coerce')
             if "NOM_ENT" not in df_temp.columns or df_temp["NOM_ENT"].isna().all():
                 df_temp["NOM_ENT"] = df_temp["CVE_ENT"].map(mapeo_entidades)
-            
+
+            # PASO 6: ✅ Convertir TODAS las columnas de preguntas a float64 AHORA
+            for col in columnas_preguntas:
+                if col in df_temp.columns:
+                    df_temp[col] = pd.to_numeric(df_temp[col], errors='coerce').astype('float64')
+
             dfs.append(df_temp)
-            
+
         except Exception as e:
-            st.warning(f"⚠️ Error procesando archivo {idx+1}: {str(e)[:100]}")
+            st.warning(f"⚠️ Error en archivo {file_id[:10]}: {str(e)[:50]}")
             continue
 
-    # Concatenar todos los DataFrames
     df_final = pd.concat(dfs, ignore_index=True)
-    
-    # Convertir columnas de preguntas a numérico
-    for col in columnas_preguntas:
-        if col in df_final.columns:
-            df_final[col] = pd.to_numeric(df_final[col], errors='coerce')
-    
+
     # Asegurar tipos numéricos en columnas base
     df_final["CVE_ENT"] = pd.to_numeric(df_final["CVE_ENT"], errors='coerce')
     df_final["EDAD"] = pd.to_numeric(df_final["EDAD"], errors='coerce')
     df_final["NIVEL"] = pd.to_numeric(df_final["NIVEL"], errors='coerce')
     df_final["P7_4"] = pd.to_numeric(df_final["P7_4"], errors='coerce')
-    
-    # Rellenar NOM_ENT faltante usando CVE_ENT (sin crear columna temporal)
+
+    # Rellenar NOM_ENT faltante usando .loc (sin columna temporal)
     mask_nom_ent_na = df_final["NOM_ENT"].isna()
     if mask_nom_ent_na.any():
         df_final.loc[mask_nom_ent_na, "NOM_ENT"] = df_final.loc[mask_nom_ent_na, "CVE_ENT"].map(mapeo_entidades)
-    
-    # Liberar memoria
-    import gc
+
+    # ✅ Desfragmentar el DataFrame UNA SOLA VEZ al final
+    df_final = df_final.copy()
+
     gc.collect()
-        
     return df_final
 
+
 df = cargar_datos_base()
+
 
 def mapear_nivel_escolaridad(nivel):
     if pd.isna(nivel):
@@ -245,6 +221,7 @@ def mapear_nivel_escolaridad(nivel):
         return "Superior"
     else:
         return None
+
 
 st.title("📊 MOCIBA - Comparativa de Entidades")
 
@@ -328,7 +305,7 @@ else:
     else:
         variable_col = variable_key
         tipo_calculo = "simple"
-    
+
     anio_seleccionado = None
     solo_victimas = False
 
@@ -341,13 +318,13 @@ filtro_edad_activo = False
 if tipo_variable == "Ciberacoso":
     st.markdown("---")
     filtro_edad_activo = st.checkbox("🔍 Filtrar por rango de edad", value=False)
-    
+
     if filtro_edad_activo:
         rango_predefinido = st.selectbox(
             "Selecciona un rango predefinido",
             ["Personalizado", "12-19 (Adolescentes)", "20-29 (Jóvenes adultos)", "30-59 (Adultos)", "60+ (Adultos mayores)"]
         )
-        
+
         if rango_predefinido == "Personalizado":
             col_edad1, col_edad2 = st.columns(2)
             with col_edad1:
@@ -362,7 +339,7 @@ if tipo_variable == "Ciberacoso":
             edad_min, edad_max = 30, 59
         else:
             edad_min, edad_max = 60, 100
-        
+
         st.info(f"📌 Rango seleccionado: {edad_min} a {edad_max} años")
 
 # Selección de dos estados para comparar
@@ -381,44 +358,54 @@ if estado_1 == estado_2:
     st.warning("⚠️ Has seleccionado el mismo estado en ambos lados. Selecciona dos estados diferentes para comparar.")
 
 
-# ===================== FUNCIONES DE CÁLCULO =====================
+# ===================== FUNCIONES DE CÁLCULO OPTIMIZADAS =====================
 
 def calcular_porcentaje(df, variable_col, sexo, estado, tipo_calculo, edad_min=None, edad_max=None, anio=None):
     df_filtrado = df.copy()
     if anio is not None:
         df_filtrado = df_filtrado[df_filtrado["ANIO"] == anio]
     if sexo == "Hombres":
-        df_filtrado = df_filtrado[df_filtrado["SEXO"] == 1].copy()
+        df_filtrado = df_filtrado[df_filtrado["SEXO"] == 1]
     elif sexo == "Mujeres":
-        df_filtrado = df_filtrado[df_filtrado["SEXO"] == 2].copy()
+        df_filtrado = df_filtrado[df_filtrado["SEXO"] == 2]
     else:
-        df_filtrado = df_filtrado[df_filtrado["SEXO"].isin([1, 2])].copy()
+        df_filtrado = df_filtrado[df_filtrado["SEXO"].isin([1, 2])]
     if estado != "NACIONAL":
         df_filtrado = df_filtrado[df_filtrado["NOM_ENT"] == estado]
     if edad_min is not None and edad_max is not None:
-        df_filtrado = df_filtrado[(df_filtrado["EDAD"] >= edad_min) & (df_filtrado["EDAD"] <= edad_max)].copy()
+        df_filtrado = df_filtrado[(df_filtrado["EDAD"] >= edad_min) & (df_filtrado["EDAD"] <= edad_max)]
 
     resultados = []
     for anio_grupo, grupo in df_filtrado.groupby("ANIO"):
-        if tipo_calculo == "simple":
-            numerador = grupo.loc[grupo[variable_col] == 1, "FACTOR"].sum()
-            denominador = grupo.loc[grupo[variable_col].isin([1, 2]), "FACTOR"].sum()
-        else:
-            mascara_ciberacoso = grupo[variable_col].eq(1).any(axis=1)
-            numerador = grupo.loc[mascara_ciberacoso, "FACTOR"].sum()
-            denominador = grupo["FACTOR"].sum()
-        porcentaje = (numerador / denominador) * 100 if denominador > 0 else 0.0
-        resultados.append({"ANIO": anio_grupo, "PORCENTAJE": round(porcentaje, 2)})
+        try:
+            if tipo_calculo == "simple":
+                numerador = grupo.loc[grupo[variable_col] == 1, "FACTOR"].sum()
+                denominador = grupo.loc[grupo[variable_col].isin([1, 2]), "FACTOR"].sum()
+            else:
+                # ✅ OPTIMIZACIÓN: Usar numpy directamente (100x más rápido)
+                valores = grupo[variable_col].to_numpy()
+                mascara_ciberacoso = np.any(valores == 1, axis=1)
+                factores = grupo["FACTOR"].to_numpy()
+                numerador = factores[mascara_ciberacoso].sum()
+                denominador = factores.sum()
+
+            porcentaje = (numerador / denominador) * 100 if denominador > 0 else 0.0
+            resultados.append({"ANIO": anio_grupo, "PORCENTAJE": round(porcentaje, 2)})
+        except Exception:
+            resultados.append({"ANIO": anio_grupo, "PORCENTAJE": 0.0})
+
     return pd.DataFrame(resultados)
 
 
 def calcular_ciberacoso_por_escolaridad(df, variable_col, estado, anio):
-    df_filtrado = df.copy()
-    df_filtrado = df_filtrado[df_filtrado["ANIO"] == anio]
+    df_filtrado = df[df["ANIO"] == anio].copy()
     if estado != "NACIONAL":
         df_filtrado = df_filtrado[df_filtrado["NOM_ENT"] == estado]
     df_filtrado = df_filtrado[df_filtrado["NIVEL"].isin([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11])]
-    mascara_ciberacoso = df_filtrado[variable_col].eq(1).any(axis=1)
+
+    # ✅ OPTIMIZACIÓN: numpy
+    valores = df_filtrado[variable_col].to_numpy()
+    mascara_ciberacoso = np.any(valores == 1, axis=1)
     df_victimas = df_filtrado[mascara_ciberacoso].copy()
     df_victimas["NIVEL_ESCOLARIDAD"] = df_victimas["NIVEL"].apply(mapear_nivel_escolaridad)
 
@@ -440,7 +427,8 @@ def calcular_horas_promedio_internet(df, estado, solo_victimas=False):
     df_filtrado = df_filtrado[df_filtrado["P7_4"] < 98]
     if solo_victimas:
         columnas_ciberacoso = [k for k in ciberacoso.keys() if k != "CUALQUIERA"]
-        mascara_ciberacoso = df_filtrado[columnas_ciberacoso].eq(1).any(axis=1)
+        valores = df_filtrado[columnas_ciberacoso].to_numpy()
+        mascara_ciberacoso = np.any(valores == 1, axis=1)
         df_filtrado = df_filtrado[mascara_ciberacoso]
 
     resultados = []
@@ -456,8 +444,7 @@ def calcular_horas_promedio_internet(df, estado, solo_victimas=False):
 
 
 def calcular_frecuencia_mensajes(df, variable_col, estado, anio):
-    df_filtrado = df.copy()
-    df_filtrado = df_filtrado[df_filtrado["ANIO"] == anio]
+    df_filtrado = df[df["ANIO"] == anio].copy()
     if estado != "NACIONAL":
         df_filtrado = df_filtrado[df_filtrado["NOM_ENT"] == estado]
     df_filtrado = df_filtrado[df_filtrado["SEXO"].isin([1, 2])]
@@ -473,7 +460,13 @@ def calcular_frecuencia_mensajes(df, variable_col, estado, anio):
             una_vez = (df_sexo[df_sexo[variable_col] == 4]["FACTOR"].sum() / denominador) * 100
         else:
             muchas_veces = algunas_veces = pocas_veces = una_vez = 0.0
-        resultados.append({"SEXO": sexo_nombre, "Muchas veces": round(muchas_veces, 2), "Algunas veces": round(algunas_veces, 2), "Pocas veces": round(pocas_veces, 2), "Una vez": round(una_vez, 2)})
+        resultados.append({
+            "SEXO": sexo_nombre,
+            "Muchas veces": round(muchas_veces, 2),
+            "Algunas veces": round(algunas_veces, 2),
+            "Pocas veces": round(pocas_veces, 2),
+            "Una vez": round(una_vez, 2)
+        })
     return pd.DataFrame(resultados)
 
 
@@ -481,124 +474,131 @@ def calcular_victimas_conocian_agresor(df, p4_variable, numero_acoso, estado):
     df_filtrado = df.copy()
     if estado != "NACIONAL":
         df_filtrado = df_filtrado[df_filtrado["NOM_ENT"] == estado]
-    
+
     col_p5_1 = f"P5_{numero_acoso}_1"
     col_p5_2 = f"P5_{numero_acoso}_2"
     col_p5_3 = f"P5_{numero_acoso}_3"
-    
     columnas_existentes = [c for c in [col_p5_1, col_p5_2, col_p5_3] if c in df_filtrado.columns]
-    
+
     if not columnas_existentes:
         return pd.DataFrame(columns=["ANIO", "PORCENTAJE"])
-    
+
     columnas_ciberacoso = [k for k in ciberacoso.keys() if k != "CUALQUIERA"]
-    
+
     resultados = []
-    
     for anio, grupo in df_filtrado.groupby("ANIO"):
-        mascara_victima = grupo[columnas_ciberacoso].eq(1).any(axis=1)
-        mascara_tipo_acoso = grupo[p4_variable] == 1
-        
-        mascara_conocia = pd.Series(False, index=grupo.index)
-        for col in columnas_existentes:
-            mascara_conocia = mascara_conocia | grupo[col].isin([1, 2, 3, 4, 5, 6, 7])
-        
+        # ✅ OPTIMIZACIÓN: numpy
+        valores_ciber = grupo[columnas_ciberacoso].to_numpy()
+        mascara_victima = np.any(valores_ciber == 1, axis=1)
+        mascara_tipo_acoso = grupo[p4_variable].to_numpy() == 1
+
+        valores_p5 = grupo[columnas_existentes].to_numpy()
+        mascara_conocia = np.any(np.isin(valores_p5, [1, 2, 3, 4, 5, 6, 7]), axis=1)
+
         mascara_final = mascara_tipo_acoso & mascara_conocia
-        
-        factor_victimas = grupo.loc[mascara_victima, "FACTOR"].sum()
-        factor_conocidos = grupo.loc[mascara_final, "FACTOR"].sum()
-        
+        factores = grupo["FACTOR"].to_numpy()
+
+        factor_victimas = factores[mascara_victima].sum()
+        factor_conocidos = factores[mascara_final].sum()
+
         porcentaje = (factor_conocidos / factor_victimas) * 100 if factor_victimas > 0 else 0.0
-        
         resultados.append({"ANIO": anio, "PORCENTAJE": round(porcentaje, 2)})
-    
+
     return pd.DataFrame(resultados)
 
 
 def calcular_edad_agresor_global(df, estado, anio):
-    df_filtrado = df.copy()
-    df_filtrado = df_filtrado[df_filtrado["ANIO"] == anio]
+    df_filtrado = df[df["ANIO"] == anio].copy()
     if estado != "NACIONAL":
         df_filtrado = df_filtrado[df_filtrado["NOM_ENT"] == estado]
-    
+
     columnas_ciberacoso = [k for k in ciberacoso.keys() if k != "CUALQUIERA"]
-    mascara_victima = df_filtrado[columnas_ciberacoso].eq(1).any(axis=1)
+
+    # ✅ OPTIMIZACIÓN: numpy
+    valores_ciber = df_filtrado[columnas_ciberacoso].to_numpy()
+    mascara_victima = np.any(valores_ciber == 1, axis=1)
     df_victimas = df_filtrado[mascara_victima].copy()
-    
+
     if len(df_victimas) == 0:
         return pd.DataFrame(columns=["RANGO_EDAD", "PORCENTAJE"])
-    
+
     total_victimas = df_victimas["FACTOR"].sum()
     if total_victimas == 0:
         return pd.DataFrame(columns=["RANGO_EDAD", "PORCENTAJE"])
-    
+
     columnas_p7 = [f"P7_{i:02d}_{j}" for i in range(1, 14) for j in range(1, 4)]
     columnas_existentes = [c for c in columnas_p7 if c in df_victimas.columns]
-    
+
     if not columnas_existentes:
         return pd.DataFrame(columns=["RANGO_EDAD", "PORCENTAJE"])
-    
+
     resultados = []
+    factores = df_victimas["FACTOR"].to_numpy()
+
     for codigo_rango in range(1, 8):
-        mascara_rango = pd.Series(False, index=df_victimas.index)
-        for col in columnas_existentes:
-            mascara_rango = mascara_rango | (df_victimas[col] == codigo_rango)
-        
-        factor_con_rango = df_victimas.loc[mascara_rango, "FACTOR"].sum()
+        # ✅ OPTIMIZACIÓN: numpy
+        valores_p7 = df_victimas[columnas_existentes].to_numpy()
+        mascara_rango = np.any(valores_p7 == codigo_rango, axis=1)
+
+        factor_con_rango = factores[mascara_rango].sum()
         porcentaje = (factor_con_rango / total_victimas) * 100
-        
+
         resultados.append({
             "RANGO_EDAD": mapeo_rangos_edad_agresor[codigo_rango],
             "PORCENTAJE": round(porcentaje, 2)
         })
-    
+
     return pd.DataFrame(resultados)
 
 
 def calcular_efectos_ciberacoso(df, estado, anio, sexo):
-    df_filtrado = df.copy()
-    df_filtrado = df_filtrado[df_filtrado["ANIO"] == anio]
+    df_filtrado = df[df["ANIO"] == anio].copy()
     if estado != "NACIONAL":
         df_filtrado = df_filtrado[df_filtrado["NOM_ENT"] == estado]
-    
+
     if sexo == "Hombres":
-        df_filtrado = df_filtrado[df_filtrado["SEXO"] == 1].copy()
+        df_filtrado = df_filtrado[df_filtrado["SEXO"] == 1]
     elif sexo == "Mujeres":
-        df_filtrado = df_filtrado[df_filtrado["SEXO"] == 2].copy()
+        df_filtrado = df_filtrado[df_filtrado["SEXO"] == 2]
     else:
-        df_filtrado = df_filtrado[df_filtrado["SEXO"].isin([1, 2])].copy()
-    
+        df_filtrado = df_filtrado[df_filtrado["SEXO"].isin([1, 2])]
+
     columnas_ciberacoso = [k for k in ciberacoso.keys() if k != "CUALQUIERA"]
-    mascara_victima = df_filtrado[columnas_ciberacoso].eq(1).any(axis=1)
+
+    # ✅ OPTIMIZACIÓN: numpy
+    valores_ciber = df_filtrado[columnas_ciberacoso].to_numpy()
+    mascara_victima = np.any(valores_ciber == 1, axis=1)
     df_victimas = df_filtrado[mascara_victima].copy()
-    
+
     if len(df_victimas) == 0:
         return pd.DataFrame(columns=["EFECTO", "PORCENTAJE"])
-    
+
     total_victimas = df_victimas["FACTOR"].sum()
     if total_victimas == 0:
         return pd.DataFrame(columns=["EFECTO", "PORCENTAJE"])
-    
+
     columnas_p10 = [f"P10_{i:02d}_{j}" for i in range(1, 14) for j in range(1, 4)]
     columnas_existentes = [c for c in columnas_p10 if c in df_victimas.columns]
-    
+
     if not columnas_existentes:
         return pd.DataFrame(columns=["EFECTO", "PORCENTAJE"])
-    
+
     resultados = []
+    factores = df_victimas["FACTOR"].to_numpy()
+
     for codigo_efecto in range(1, 16):
-        mascara_efecto = pd.Series(False, index=df_victimas.index)
-        for col in columnas_existentes:
-            mascara_efecto = mascara_efecto | (df_victimas[col] == codigo_efecto)
-        
-        factor_con_efecto = df_victimas.loc[mascara_efecto, "FACTOR"].sum()
+        # ✅ OPTIMIZACIÓN: numpy
+        valores_p10 = df_victimas[columnas_existentes].to_numpy()
+        mascara_efecto = np.any(valores_p10 == codigo_efecto, axis=1)
+
+        factor_con_efecto = factores[mascara_efecto].sum()
         porcentaje = (factor_con_efecto / total_victimas) * 100
-        
+
         resultados.append({
             "EFECTO": mapeo_efectos_ciberacoso[codigo_efecto],
             "PORCENTAJE": round(porcentaje, 2)
         })
-    
+
     return pd.DataFrame(resultados)
 
 
@@ -608,42 +608,42 @@ if tipo_variable == "Ciberacoso por nivel de escolaridad":
     if estado_1 != estado_2:
         resultado_1 = calcular_ciberacoso_por_escolaridad(df, variable_col, estado_1, anio_seleccionado)
         resultado_2 = calcular_ciberacoso_por_escolaridad(df, variable_col, estado_2, anio_seleccionado)
-        
+
         tabla_1 = resultado_1.pivot(index="NIVEL_ESCOLARIDAD", columns="SEXO", values="PORCENTAJE").fillna(0)
         tabla_2 = resultado_2.pivot(index="NIVEL_ESCOLARIDAD", columns="SEXO", values="PORCENTAJE").fillna(0)
-        
+
         tabla_1.columns = [f"{col} - {estado_1}" for col in tabla_1.columns]
         tabla_2.columns = [f"{col} - {estado_2}" for col in tabla_2.columns]
-        
+
         comparativa = pd.concat([tabla_1, tabla_2], axis=1).reset_index()
-        
+
         st.subheader(f"Distribución de Víctimas de Ciberacoso por Nivel de Escolaridad - Año {anio_seleccionado}")
         st.info("💡 De todas las víctimas de ciberacoso de ese sexo, ¿qué porcentaje tiene ese nivel de escolaridad?")
-        st.dataframe(comparativa, use_container_width=True)
-        
+        st.dataframe(comparativa, width='stretch')
+
         grafico_data = resultado_1.copy()
         grafico_data["ENTIDAD"] = estado_1
         grafico_data2 = resultado_2.copy()
         grafico_data2["ENTIDAD"] = estado_2
         grafico_completo = pd.concat([grafico_data, grafico_data2])
-        
+
         st.bar_chart(grafico_completo, x="NIVEL_ESCOLARIDAD", y="PORCENTAJE", color="SEXO", x_label="Nivel de Escolaridad", y_label="Porcentaje de Víctimas (%)")
 
 elif tipo_variable == "Horas promedio de uso de internet":
     if estado_1 != estado_2:
         resultado_1 = calcular_horas_promedio_internet(df, estado_1, solo_victimas)
         resultado_2 = calcular_horas_promedio_internet(df, estado_2, solo_victimas)
-        
+
         comparativa = pd.merge(resultado_1, resultado_2, on="ANIO", how="outer", suffixes=(f"_{estado_1}", f"_{estado_2}")).fillna(0)
         comparativa = comparativa.rename(columns={f"HORAS_PROMEDIO_{estado_1}": estado_1, f"HORAS_PROMEDIO_{estado_2}": estado_2})
         comparativa = comparativa[["ANIO", estado_1, estado_2]]
         comparativa["Diferencia (horas)"] = round(comparativa[estado_1] - comparativa[estado_2], 2)
-        
+
         titulo = "Horas Promedio de Uso de Internet - Solo Víctimas de Ciberacoso" if solo_victimas else "Horas Promedio de Uso de Internet - Población General"
         st.subheader(titulo)
         st.info("💡 Promedio ponderado de horas de uso de internet al día (excluyendo valores no especificados)")
-        st.dataframe(comparativa, use_container_width=True)
-        
+        st.dataframe(comparativa, width='stretch')
+
         grafico_data = comparativa.melt(id_vars=["ANIO"], value_vars=[estado_1, estado_2], var_name="Entidad", value_name="Horas Promedio")
         st.line_chart(grafico_data, x="ANIO", y="Horas Promedio", color="Entidad", y_label="Horas al Día", x_label="Año")
 
@@ -651,17 +651,17 @@ elif tipo_variable == "Frecuencia de mensajes ofensivos":
     if estado_1 != estado_2:
         resultado_1 = calcular_frecuencia_mensajes(df, variable_col, estado_1, anio_seleccionado)
         resultado_2 = calcular_frecuencia_mensajes(df, variable_col, estado_2, anio_seleccionado)
-        
+
         tabla_1 = resultado_1.set_index("SEXO")
         tabla_2 = resultado_2.set_index("SEXO")
         tabla_1.columns = [f"{col} - {estado_1}" for col in tabla_1.columns]
         tabla_2.columns = [f"{col} - {estado_2}" for col in tabla_2.columns]
         comparativa = pd.concat([tabla_1, tabla_2], axis=1).reset_index().rename(columns={"index": "Sexo"})
-        
+
         st.subheader(f"Frecuencia de {variable} - Año {anio_seleccionado}")
         st.info("💡 Distribución porcentual de la frecuencia (Muchas veces, Algunas veces, Pocas veces, Una vez)")
-        st.dataframe(comparativa, use_container_width=True)
-        
+        st.dataframe(comparativa, width='stretch')
+
         frecuencias = ["Muchas veces", "Algunas veces", "Pocas veces", "Una vez"]
         grafico_data = []
         for _, row in resultado_1.iterrows():
@@ -670,14 +670,14 @@ elif tipo_variable == "Frecuencia de mensajes ofensivos":
         for _, row in resultado_2.iterrows():
             for freq in frecuencias:
                 grafico_data.append({"Frecuencia": freq, "Porcentaje": row[freq], "Sexo": row["SEXO"], "Entidad": estado_2})
-        
+
         st.bar_chart(pd.DataFrame(grafico_data), x="Frecuencia", y="Porcentaje", color="Sexo", x_label="Frecuencia", y_label="Porcentaje (%)")
 
 elif tipo_variable == "Víctimas que conocían al agresor":
     if estado_1 != estado_2:
         resultado_1 = calcular_victimas_conocian_agresor(df, variable_col, numero_acoso, estado_1)
         resultado_2 = calcular_victimas_conocian_agresor(df, variable_col, numero_acoso, estado_2)
-        
+
         if resultado_1.empty and resultado_2.empty:
             st.warning(f"⚠️ No se encontraron datos de identidad del agresor (P5_{numero_acoso}_1, P5_{numero_acoso}_2, P5_{numero_acoso}_3) en el archivo.")
         else:
@@ -685,11 +685,11 @@ elif tipo_variable == "Víctimas que conocían al agresor":
             comparativa = comparativa.rename(columns={f"PORCENTAJE_{estado_1}": estado_1, f"PORCENTAJE_{estado_2}": estado_2})
             comparativa = comparativa[["ANIO", estado_1, estado_2]]
             comparativa["Diferencia (pp)"] = round(comparativa[estado_1] - comparativa[estado_2], 2)
-            
+
             st.subheader(f"Víctimas que Conocían al Agresor - {tipo_acoso_seleccionado}")
             st.info(f"💡 De todas las víctimas de ciberacoso, ¿qué porcentaje sufrió '{tipo_acoso_seleccionado}' y conocía a la persona agresora?")
-            st.dataframe(comparativa, use_container_width=True)
-            
+            st.dataframe(comparativa, width='stretch')
+
             grafico_data = comparativa.melt(id_vars=["ANIO"], value_vars=[estado_1, estado_2], var_name="Entidad", value_name="Porcentaje")
             st.line_chart(grafico_data, x="ANIO", y="Porcentaje", color="Entidad", y_label="Porcentaje (%)", x_label="Año")
 
@@ -697,93 +697,61 @@ elif tipo_variable == "Edad de la persona acosadora":
     if estado_1 != estado_2:
         resultado_1 = calcular_edad_agresor_global(df, estado_1, anio_seleccionado)
         resultado_2 = calcular_edad_agresor_global(df, estado_2, anio_seleccionado)
-        
+
         if resultado_1.empty and resultado_2.empty:
             st.warning(f"⚠️ No se encontraron datos de edad del agresor en el archivo.")
         else:
             tabla_1 = resultado_1.set_index("RANGO_EDAD")
             tabla_2 = resultado_2.set_index("RANGO_EDAD")
-            
+
             tabla_1.columns = [f"{col} - {estado_1}" for col in tabla_1.columns]
             tabla_2.columns = [f"{col} - {estado_2}" for col in tabla_2.columns]
-            
+
             comparativa = pd.concat([tabla_1, tabla_2], axis=1).fillna(0).reset_index()
             comparativa = comparativa.rename(columns={"index": "Rango de Edad"})
-            
+
             st.subheader(f"Edad de la Persona Acosadora - Año {anio_seleccionado}")
             st.info("💡 Porcentaje de víctimas de ciberacoso que reportaron al menos un agresor en cada rango de edad. Los porcentajes pueden sumar más del 100% porque una víctima puede tener agresores de diferentes rangos.")
-            st.dataframe(comparativa, use_container_width=True)
-            
+            st.dataframe(comparativa, width='stretch')
+
             grafico_data = []
             for _, row in resultado_1.iterrows():
-                grafico_data.append({
-                    "Rango de Edad": row["RANGO_EDAD"],
-                    "Porcentaje": row["PORCENTAJE"],
-                    "Entidad": estado_1
-                })
+                grafico_data.append({"Rango de Edad": row["RANGO_EDAD"], "Porcentaje": row["PORCENTAJE"], "Entidad": estado_1})
             for _, row in resultado_2.iterrows():
-                grafico_data.append({
-                    "Rango de Edad": row["RANGO_EDAD"],
-                    "Porcentaje": row["PORCENTAJE"],
-                    "Entidad": estado_2
-                })
-            
+                grafico_data.append({"Rango de Edad": row["RANGO_EDAD"], "Porcentaje": row["PORCENTAJE"], "Entidad": estado_2})
+
             df_grafico = pd.DataFrame(grafico_data)
-            
-            st.bar_chart(
-                df_grafico,
-                x="Rango de Edad",
-                y="Porcentaje",
-                color="Entidad",
-                x_label="Edad del Agresor",
-                y_label="Porcentaje de Víctimas (%)"
-            )
+            st.bar_chart(df_grafico, x="Rango de Edad", y="Porcentaje", color="Entidad", x_label="Edad del Agresor", y_label="Porcentaje de Víctimas (%)")
 
 elif tipo_variable == "Efectos del ciberacoso":
     if estado_1 != estado_2:
         resultado_1 = calcular_efectos_ciberacoso(df, estado_1, anio_seleccionado, sexo)
         resultado_2 = calcular_efectos_ciberacoso(df, estado_2, anio_seleccionado, sexo)
-        
+
         if resultado_1.empty and resultado_2.empty:
             st.warning(f"⚠️ No se encontraron datos de efectos del ciberacoso (P10_XX_j) en el archivo.")
         else:
             tabla_1 = resultado_1.set_index("EFECTO")
             tabla_2 = resultado_2.set_index("EFECTO")
-            
+
             tabla_1.columns = [f"{col} - {estado_1}" for col in tabla_1.columns]
             tabla_2.columns = [f"{col} - {estado_2}" for col in tabla_2.columns]
-            
+
             comparativa = pd.concat([tabla_1, tabla_2], axis=1).fillna(0).reset_index()
             comparativa = comparativa.rename(columns={"index": "Efecto"})
-            
+
             st.subheader(f"Efectos del Ciberacoso - Año {anio_seleccionado} - {sexo}")
             st.info("💡 Porcentaje de víctimas de ciberacoso que experimentaron cada efecto. Los porcentajes pueden sumar más del 100% porque una víctima puede experimentar múltiples efectos.")
-            st.dataframe(comparativa, use_container_width=True)
-            
+            st.dataframe(comparativa, width='stretch')
+
             grafico_data = []
             for _, row in resultado_1.iterrows():
-                grafico_data.append({
-                    "Efecto": row["EFECTO"],
-                    "Porcentaje": row["PORCENTAJE"],
-                    "Entidad": estado_1
-                })
+                grafico_data.append({"Efecto": row["EFECTO"], "Porcentaje": row["PORCENTAJE"], "Entidad": estado_1})
             for _, row in resultado_2.iterrows():
-                grafico_data.append({
-                    "Efecto": row["EFECTO"],
-                    "Porcentaje": row["PORCENTAJE"],
-                    "Entidad": estado_2
-                })
-            
+                grafico_data.append({"Efecto": row["EFECTO"], "Porcentaje": row["PORCENTAJE"], "Entidad": estado_2})
+
             df_grafico = pd.DataFrame(grafico_data)
-            
-            st.bar_chart(
-                df_grafico,
-                x="Efecto",
-                y="Porcentaje",
-                color="Entidad",
-                x_label="Efecto",
-                y_label="Porcentaje de Víctimas (%)"
-            )
+            st.bar_chart(df_grafico, x="Efecto", y="Porcentaje", color="Entidad", x_label="Efecto", y_label="Porcentaje de Víctimas (%)")
 
 else:
     if estado_1 != estado_2:
@@ -797,7 +765,7 @@ else:
 
         titulo_subheader = f"{variable} - Rango de edad: {edad_min} a {edad_max} años" if filtro_edad_activo else variable
         st.subheader(f"Comparativa: {titulo_subheader}")
-        st.dataframe(comparativa, use_container_width=True)
+        st.dataframe(comparativa, width='stretch')
 
         grafico_data = comparativa.melt(id_vars=["ANIO"], value_vars=[estado_1, estado_2], var_name="Entidad", value_name="Porcentaje")
         st.line_chart(grafico_data, x="ANIO", y="Porcentaje", color="Entidad", y_label="Porcentaje (%)", x_label="Año")
